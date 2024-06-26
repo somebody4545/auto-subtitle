@@ -1,10 +1,12 @@
 import os
 import ffmpeg
+from whisper.utils import get_writer
 import whisper
 import argparse
 import warnings
 import tempfile
 from .utils import filename, str2bool, write_srt
+
 
 
 def main():
@@ -24,9 +26,18 @@ def main():
                         help="whether to print out the progress and debug messages")
 
     parser.add_argument("--task", type=str, default="transcribe", choices=[
-                        "transcribe", "translate"], help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')")
-    parser.add_argument("--language", type=str, default="auto", choices=["auto","af","am","ar","as","az","ba","be","bg","bn","bo","br","bs","ca","cs","cy","da","de","el","en","es","et","eu","fa","fi","fo","fr","gl","gu","ha","haw","he","hi","hr","ht","hu","hy","id","is","it","ja","jw","ka","kk","km","kn","ko","la","lb","ln","lo","lt","lv","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","nl","nn","no","oc","pa","pl","ps","pt","ro","ru","sa","sd","si","sk","sl","sn","so","sq","sr","su","sv","sw","ta","te","tg","th","tk","tl","tr","tt","uk","ur","uz","vi","yi","yo","zh"], 
-    help="What is the origin language of the video? If unset, it is detected automatically.")
+        "transcribe", "translate"],
+                        help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')")
+    parser.add_argument("--language", type=str, default="auto",
+                        choices=["auto", "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca",
+                                 "cs", "cy", "da", "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl",
+                                 "gu", "ha", "haw", "he", "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw",
+                                 "ka", "kk", "km", "kn", "ko", "la", "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk",
+                                 "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn", "no", "oc", "pa", "pl", "ps",
+                                 "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq", "sr", "su", "sv",
+                                 "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi", "yi",
+                                 "yo", "zh"],
+                        help="What is the origin language of the video? If unset, it is detected automatically.")
 
     args = parser.parse_args().__dict__
     model_name: str = args.pop("model")
@@ -34,7 +45,7 @@ def main():
     output_srt: bool = args.pop("output_srt")
     srt_only: bool = args.pop("srt_only")
     language: str = args.pop("language")
-    
+
     os.makedirs(output_dir, exist_ok=True)
 
     if model_name.endswith(".en"):
@@ -44,28 +55,25 @@ def main():
     # if translate task used and language argument is set, then use it
     elif language != "auto":
         args["language"] = language
-        
+
     model = whisper.load_model(model_name)
     audios = get_audio(args.pop("video"))
     subtitles = get_subtitles(
-        audios, output_srt or srt_only, output_dir, lambda audio_path: model.transcribe(audio_path, **args)
+        audios, output_srt or srt_only, output_dir, model.transcribe
     )
 
     if srt_only:
         return
 
     for path, srt_path in subtitles.items():
-        out_path = os.path.join(output_dir, f"{filename(path)}.mp4")
-
-        print(f"Adding subtitles to {filename(path)}...")
-
-        video = ffmpeg.input(path)
-        audio = video.audio
-
-        ffmpeg.concat(
-            video.filter('subtitles', srt_path, force_style="OutlineColour=&H40000000,BorderStyle=3"), audio, v=1, a=1
-        ).output(out_path).run(quiet=True, overwrite_output=True)
-
+        out_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(path))[0]}.mp4")
+        print(f"Adding subtitles to {os.path.basename(path)}...")
+        stream = ffmpeg.input(path)
+        audio = stream.audio
+        video = stream.video.filter('subtitles', filename=srt_path,
+                                    force_style='Alignment=10,Outline=2,OutlineColour=&H000000&')
+        stream = ffmpeg.output(audio, video, out_path, vcodec='libx264', acodec='copy')
+        ffmpeg.run(stream)
         print(f"Saved subtitled video to {os.path.abspath(out_path)}.")
 
 
@@ -92,19 +100,24 @@ def get_subtitles(audio_paths: list, output_srt: bool, output_dir: str, transcri
     subtitles_path = {}
 
     for path, audio_path in audio_paths.items():
-        srt_path = output_dir if output_srt else tempfile.gettempdir()
+        srt_path = output_dir if output_srt else output_dir
         srt_path = os.path.join(srt_path, f"{filename(path)}.srt")
-        
+
         print(
             f"Generating subtitles for {filename(path)}... This might take a while."
         )
-
+        print(f"Output {srt_path}")
         warnings.filterwarnings("ignore")
-        result = transcribe(audio_path)
+        result = transcribe(audio_path, initial_prompt="prompt", word_timestamps=True)
         warnings.filterwarnings("default")
 
-        with open(srt_path, "w", encoding="utf-8") as srt:
-            write_srt(result["segments"], file=srt)
+        word_options = {
+          "highlight_words": True,
+          "max_line_count": 1,
+          "max_line_width": 15
+        }
+        srt_writer = get_writer("srt", output_dir)
+        srt_writer(result, srt_path, word_options)
 
         subtitles_path[path] = srt_path
 
